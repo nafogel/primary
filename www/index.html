@@ -1,0 +1,1080 @@
+<html>
+<head>
+<meta name="viewport" content="user-scalable=no, initial-scale=1, maximum-scale=1, minimum-scale=1, width=device-width, height=device-height, target-densitydpi=device-dpi" />
+<script src="js/jquery-3.3.1.min.js"></script>
+<script src="js/jquery.mobile-1.5.0-alpha.1.min.js"></script>
+<script src="js/jquery.color.js"></script>
+<script src="js/color_mixer.js"></script>
+<script src="js/maps.js"></script>
+<script src="js/admob_simple.js"></script>
+<script>
+//Set to true when testing, will unlock all zones and levels
+var devMode = false;
+if (devMode) {
+	splashDelay = 0;
+} else {
+	splashDelay = 1500;
+}
+
+//Important global variables
+var db = openDatabase('nafogelprimary', '1.0', 'Primary DB', 2 * 1024 * 1024);
+var starsArray  = new Array();
+var numStars = 0;
+var soundOn;
+
+//					   red		yellow	 blue	  purple   green    orange   black    white    grey		pink	 d grey   l blue
+var colors = new Array("cc0000","f5fc0f","00c2ff","735873","7ce087","e17207","080808","efefef","7c7c7c","de6f6f","424242","7cdaf8");
+var colorPoints = new Array(1,1,1,2,2,2,3,3,4,4,5,4);
+var score = 0;
+var nextAd = Math.floor(Math.random()*5)+3;
+var neighbors = new Array();
+var checked = new Array();
+var blocks = new Object();
+var cells = new Object();
+var selected = null;
+var gravityRan = false;
+var highlighted;
+var fireWorksTime;
+var fireWorksId = 0;
+var curMap = 0;
+
+/** ----------------------------------
+-Begin Audio Files
+---------------------------------- **/
+var soundClear = new Audio("audio/bubble.wav");		//Plays whenever a group is cleared
+var soundSelect = new Audio("audio/click.wav");		//Plays whenever a group is selected
+var soundDeselect = new Audio("audio/click_1.wav");	//Plays whenever a group is deselected
+var soundCombine = new Audio("audio/combine.wav");	//Plays a sound when two groups are combined
+var soundThud = new Audio("audio/thud.wav");		//Plays when a group falls
+var soundComplete = new Audio("audio/complete.wav");	//Plays when a level is completed
+var soundWrong = new Audio("audio/wrong.wav");		//Plays when an "unselectable" block/group is selected
+/** ----------------------------------
+-End Audio Files
+---------------------------------- **/
+
+$(document).ready(function() {
+	//Android/iOS specific stylesheets
+	if(/(ipod|iphone|ipad)/i.test(navigator.userAgent)) {
+		//Apple does not allow users to exit apps, remove links if iOS
+		$("#exit_footer").remove();
+		$("#exit_menu").remove();
+		$("#home_footer").css("borderRight", "none");
+		$('head').append('<link rel="stylesheet" type="text/css" href="style/main_ios.css">');
+	} else {
+		$('head').append('<link rel="stylesheet" type="text/css" href="style/main.css">');
+	}
+
+	/** ----------------------------------
+	-Begin DB stuff
+	---------------------------------- **/
+	//Createing tables if they don't exist
+	db.transaction(function (tx) {   
+	   tx.executeSql('CREATE TABLE IF NOT EXISTS SETTINGS (name unique, value)');
+	   tx.executeSql('CREATE TABLE IF NOT EXISTS STARS (level unique, number)');
+	});
+	//Update settings
+	db.transaction(function (tx) { 
+	tx.executeSql('SELECT * FROM SETTINGS', [], function (tx, results) { 
+		var len = results.rows.length, i;
+		//If the setting hasn't been set yet declare it
+		if (len == 0) {
+			soundOn = true;
+			tx.executeSql('INSERT INTO SETTINGS (name, value) VALUES ("sound", "on")');
+		} else {
+			for (i = 0; i < len; i++) {
+				switch(results.rows.item(i).name) {
+					case "sound":
+						if (results.rows.item(i).value == "on") {
+							soundOn = true;
+						} else {
+							soundOn = false;
+						}
+						break;
+					default:
+						soundOn = true;
+						break;
+				}
+			}
+		}
+		if (soundOn) {
+			$("#sound_menu").children("img").attr("src", "images/volume_off.png");
+		}
+	}, null);
+	});
+	//Update stars count
+	db.transaction(function (tx) { 
+	tx.executeSql('SELECT * FROM STARS', [], function (tx, results) { 
+		var len = results.rows.length, i;
+		for (i = 0; i < len; i++) {
+			starsArray[results.rows.item(i).level] = results.rows.item(i).number;
+		}
+		for (i=0;i<starsArray.length;i++) {
+			if ($.isNumeric(starsArray[i])) {
+				numStars += starsArray[i];
+			}
+		}
+		resize();
+		resize();
+		showZones();
+	}, null);
+	});
+	/** ----------------------------------
+	-End DB Stuff
+	---------------------------------- **/
+
+	/** ----------------------------------
+	-Begin Global Listeners
+	---------------------------------- **/
+	$("#retry_footer, #retry_menu").on("click", function() {
+		$("#menu").fadeOut("fast");
+		$("#level_complete").stop().fadeOut("fast");
+		restartLevel();
+	});
+	$("#menu_button").on("click", function() {
+		if ($("#menu").css("display", "none")) {
+			$("#menu").fadeIn("fast");
+		}
+	});
+	$("#x_menu").on("click", function() {
+		$("#menu").fadeOut("fast");
+	});
+	$("#home_footer, #home_menu").on("click", function() {
+		$("#menu").fadeOut("fast");
+		$("#level_complete").stop().fadeOut("fast");
+		showZones();
+	});
+	$("#exit_footer, #exit_menu").on("click", function() {
+		exitApp('confirm');
+	});
+	$(".quit_confirm_yn").on("click", function() {
+		exitApp($(this).text());
+	});
+	$("#help_menu").on("click", function() {
+		$("#menu").fadeOut("fast");
+		$("#how_to_play").fadeIn("fast");
+	});
+	$("#x_how_to_play").on("click", function() {
+		$("#how_to_play").fadeOut("fast");
+	});
+	$("#sound_menu").on("click", function() {
+		if (soundOn) {
+			soundOn = false;
+			$("#sound_menu").children("img").attr("src", "images/volume.png");
+			db.transaction(function (tx) {
+				tx.executeSql('UPDATE SETTINGS SET value = "off" WHERE name = "sound"');
+			});
+		} else {
+			soundOn = true;
+			$("#sound_menu").children("img").attr("src", "images/volume_off.png");
+			db.transaction(function (tx) {
+				tx.executeSql('UPDATE SETTINGS SET value = "on" WHERE name = "sound"');
+			});
+		}
+	});
+	$("#profile_menu").on("click", function() {
+		$("#menu").fadeOut("fast");
+		showProfile();
+	});
+	$("#score_box").on("click", function() {
+		if($(this).is(':contains("How To Play")')) {
+			$("#how_to_play").fadeIn("fast");
+		}
+	});
+	/** ----------------------------------
+	-End Global Listeners
+	---------------------------------- **/
+});
+
+//Show zones/Home Screen
+function showZones() {
+	$("#game_window").children().remove();
+	$("#score_box").html('<span><img src="images/help.png" style="width:6vw;margin-right:4px;" />How To Play</span>');
+	$("<div/>", {
+		class : "zone_header",
+		text : "Select a Zone",
+		appendTo : "#game_window"
+	});
+	for (i=0;i<9;i++) {
+		$("<div/>", {
+			id : "zone_"+i,
+			class : "zone",
+			attr : {
+				"zone" : i
+			},
+			on : {
+				click : function() {
+					showLevels(this);
+				}
+			},
+			appendTo : "#game_window"
+		});
+		for (z=0;z<4;z++) {
+			if (z==0) {
+				$("<div/>", {
+					class : "zone_cell_num",
+					text : i+1,
+					appendTo : "#zone_"+i
+				});
+			} else {
+				$("<div/>", {
+					class : "zone_cell",
+					css : {
+						backgroundColor : "#"+colors[z-1],
+						borderColor : "#"+colors[z-1]
+					},
+					appendTo : "#zone_"+i
+				});
+			}
+		}
+		//Whether or not a zone is unlocked; 20 stars per zone unlock
+		if (numStars < i*20 && devMode == false) {
+			$("#zone_"+i).attr("locked", true);
+			$("<img/>", {
+				src : "images/lock.png",
+				css : {
+					left : "10%",
+					top : "10%",
+					position : "absolute",
+					opacity: "0.9",
+					width : "80%"
+				},
+				appendTo : "#zone_"+i
+			});
+		} else {
+			$("#zone_"+i).attr("locked", false);
+		}
+		if ((i+1)%3 == 0) {
+			for (f=2;f>-1;f--) {
+				$("<div/>", {
+					id : "zone_stars_"+(i-f),
+					class : "zone_footer",
+					appendTo : "#game_window"
+				});
+				var zsCount = 0;
+				for (s=((i-f)*9);s<((i-f)*9)+9;s++) {
+					if ($.isNumeric(starsArray[s])) {
+						zsCount += starsArray[s];
+					}
+				}
+				if (zsCount == 27) {
+					$("<img/>", {
+						src : "images/star_edge.png",
+						css : {
+							position : "absolute",
+							top : "28%",
+							left : "28%",
+							width : "44%"
+						},
+						appendTo : "#zone_"+(i-f)
+					});
+				}
+				var zsHTML = zsCount+'/27 <img src="images/star_filled.png" width="20%" />';
+				$("#zone_stars_"+(i-f)).html(zsHTML);
+			}
+		}
+	}
+	$("#blanket").remove();
+	$("#splash_screen").delay(splashDelay).fadeOut("slow",function() {
+		$(this).remove();
+	});
+}
+function showLevels(obj) {
+	if ($(obj).attr("locked") != "true") {
+		$("#game_window").children().remove();
+		$("#score_box").html('<span><img src="images/help.png" style="width:6vw;margin-right:4px;" />How To Play</span>');
+		$("<div/>", {
+			class : "zone_header",
+			text : "Select a Level",
+			appendTo : "#game_window"
+		});
+		var zone = parseInt($(obj).attr("zone"))+1;
+		for (i=(zone*9)-9;i<zone*9;i++) {
+			$("<div/>", {
+				id : "level_"+i,
+				class : "zone",
+				on : {
+					click : function() {
+						curMap = parseInt($(this).attr("id").substring(6));
+						draw(eval("map"+$(this).attr("id").substring(6)));
+					}
+				},
+				css : {
+					color : "#FFF",
+					fontSize : "150%",
+					textAlign : "center"
+				},
+				appendTo : "#game_window"
+			});
+			$("<span/>", {
+				text : i + 1,
+				class : "zone_cell_num",
+				css : {
+					position : "absolute",
+					top : "0px",
+					left : "0px",
+					textShadow : "4px 4px 4px #333"
+				},
+				appendTo : "#level_"+i
+			});
+			for (m=0;m<64;m++) {
+				var mm = eval("map"+i);
+				$("<div/>", {
+					class : "level_mini_blocks",
+					css : {
+						backgroundColor : "#"+colors[eval("map"+i+"["+m+"]")]
+					},
+					appendTo : "#level_"+i
+				});
+			}
+			if ((i+1)%3 == 0) {
+					for (f=2;f>-1;f--) {
+					$("<div/>", {
+						id : "level_stars_"+(i-f),
+						class : "zone_footer",
+						appendTo : "#game_window"
+					});
+					if (starsArray[i-f] == 3) {
+						lsHTML = '<img src="images/star_filled.png" width="20%" /><img src="images/star_filled.png" width="20%" /><img src="images/star_filled.png" width="20%" />';
+					} else if (starsArray[i-f] == 2) {
+						lsHTML = '<img src="images/star_filled.png" width="20%" /><img src="images/star_filled.png" width="20%" /><img src="images/star_empty.png" width="20%" />';
+					} else if (starsArray[i-f] == 1) {
+						lsHTML = '<img src="images/star_filled.png" width="20%" /><img src="images/star_empty.png" width="20%" /><img src="images/star_empty.png" width="20%" />';
+					} else {
+						lsHTML = '<img src="images/star_empty.png" width="20%" /><img src="images/star_empty.png" width="20%" /><img src="images/star_empty.png" width="20%" />';
+					}
+					$("#level_stars_"+(i-f)).html(lsHTML);
+				}
+			}
+		}
+	}
+}
+function showProfile() {
+	$("#game_window").children().remove();
+	$("#score_box").html('<span><img src="images/help.png" style="width:6vw;margin-right:4px;" />How To Play</span>');
+	$("#level_complete").stop().fadeOut("fast");
+	$("<div/>", {
+		text : "My Profile",
+		css : {
+			color : "#EEE",
+			textAlign : "center",
+			fontSize : "6vw",
+			fontFamily : "'Arial Black', Gadget, sans-serif",
+			fontWeight : "bold"
+		},
+		appendTo : "#game_window"
+	});
+	$("<hr/>", {
+		css : {
+			width : "80%",
+			backgroundColor : "#333",
+			color : "#333"
+		},
+		appendTo : "#game_window"
+	});
+	$("<div/>", {
+		text : "Total Stars",
+		class : "profile_left",
+		appendTo : "#game_window"
+	});
+	$("<div/>", {
+		text : numStars+"/243",
+		class : "profile_right",
+		appendTo : "#game_window"
+	});
+	var levelsCompleted = 0;
+	for (i=0;i<starsArray.length;i++) {
+		if ($.isNumeric(starsArray[i])) {
+			levelsCompleted++;
+		}
+	}
+	$("<div/>", {
+		text : "Levels Cleared",
+		class : "profile_left",
+		appendTo : "#game_window"
+	});
+	$("<div/>", {
+		text : levelsCompleted+"/81",
+		class : "profile_right",
+		appendTo : "#game_window"
+	});
+	var zonesUnlocked = Math.floor(numStars/20)+1;
+	$("<div/>", {
+		text : "Zones Unlocked",
+		class : "profile_left",
+		appendTo : "#game_window"
+	});
+	$("<div/>", {
+		text : zonesUnlocked+"/9",
+		class : "profile_right",
+		appendTo : "#game_window"
+	});
+	var zonesCleared = 0;
+	for (z=0;z<9;z++) {
+		var nS = 0;
+		for (l=0;l<9;l++) {
+			var map = (z*9)+l;
+			if ($.isNumeric(starsArray[map]) && starsArray[map] == 3) {
+				nS++;
+			}
+		}
+		if (nS == 9) {
+			zonesCleared++;
+		}
+		ns = 0;
+	}
+	$("<div/>", {
+		text : "Zones Completed",
+		class : "profile_left",
+		appendTo : "#game_window"
+	});
+	$("<div/>", {
+		text : zonesCleared+"/9",
+		class : "profile_right",
+		appendTo : "#game_window"
+	});
+	if (soundOn) {
+		var soundOnOff = "On";
+	} else {
+		var soundOnOff = "Off";
+	}
+	$("<div/>", {
+		text : "Sound",
+		class : "profile_left",
+		css : {
+			marginTop : "4vw"
+		},
+		appendTo : "#game_window"
+	});
+	$("<div/>", {
+		text : soundOnOff,
+		class : "profile_right",
+		css : {
+			marginTop : "4vw"
+		},
+		appendTo : "#game_window"
+	});
+}
+function draw(map) {
+	$("#game_window").children().remove();
+	blocks = [];
+	cells = [];
+	score = 0;
+	selected = null;
+	if (nextAd!=0) {
+		nextAd--;
+		if (nextAd==1) {
+			console.log("loading ad...");
+			if(AdMob) AdMob.prepareInterstitial( {adId:admobid.interstitial, autoShow:false} );
+		}
+	}
+	if (nextAd==0) {
+		console.log("playing ad...");
+		if(AdMob) AdMob.showInterstitial();
+		nextAd = Math.floor(Math.random()*5)+3;
+	}
+	$("#score_box").html("<span>Score: "+score+"</span>");
+	var blockHTML = '';
+	for (i=0;i<64;i++) {
+		var blockColor = colors[map[i]];
+		$("<div/>", {
+			id : "cell_"+i,
+			class : "cell",
+			appendTo : "#game_window"
+		});
+		$("<div/>", {
+			id : 'block_'+i,
+			class : "block",
+			css : {
+				background : "#"+blockColor,
+				borderColor : "#"+blockColor
+			},
+			on : {
+				taphold : function() {
+					longPress(this);
+				},
+				tap : function() {
+					shortPress(this);
+				}
+			},
+			appendTo : "#cell_"+i
+		});
+		$("<span/>", {
+			id : 'color_depth_'+i,
+			class : "color_depth",
+			text : colorPoints[map[i]],
+			css : {
+				textShadow : "0px 2px 0px #"+blockColor
+			},
+			appendTo : "#block_"+i
+		});
+		var tmpBlockArray = new Array();
+		tmpBlockArray['parent'] = 'cell_'+i;
+		tmpBlockArray['parent_num_id'] = i;
+		tmpBlockArray['num_id'] = i;
+		tmpBlockArray['color'] = blockColor;
+		tmpBlockArray['depth'] = colorPoints[map[i]];
+		blocks['block_'+i] = tmpBlockArray;
+		cells['cell_'+i] = 'block_'+i;
+	}
+	resize();
+}
+function restartLevel() {
+	$("#level_complete").fadeOut("fast");
+	$("#"+selected).css("opacity", "1");
+	selected = null;
+	draw(eval('map'+curMap));;
+}
+function nextLevel() {
+	if (curMap != 80 && Math.floor(numStars/20) >= Math.floor((curMap+1)/9)) {
+		curMap++;
+		draw(eval('map'+curMap));
+	}
+}
+//All sounds are played through this function to enable muting
+function playSound(sound) {
+	if (soundOn) {
+		sound.pause();
+		sound.currentTime = 0;
+		sound.play();
+	}
+}
+function longPress(obj) {
+	$(".block").css("opacity", "1");
+	selected = null;
+	gravityRan = false;
+	//long press clears the block and any matching neighbors
+	neighbors = [];
+	checked = [];
+	neighbors = getNeighbors(obj.id);
+	if (neighbors.length > 2) {
+		score += blocks[obj.id]['depth']*neighbors.length;
+		scorePopUp(obj, blocks[obj.id]['depth']*neighbors.length);
+		$("#score_box").text("Score: "+score);
+		var neighborsGroup= "";
+		for (i=0;i<neighbors.length;i++) {
+			cells[blocks[neighbors[i]]['parent']] = null;
+			blocks[neighbors[i]]['parent'] = null;
+			blocks[neighbors[i]]['parent_num_id'] = null;
+			neighborsGroup += "#"+neighbors[i]+',';
+		}
+		neighborsGroup = neighborsGroup.slice(0, -1)
+		$(neighborsGroup).fadeOut('fast', function() {
+			$(neighborsGroup).remove();
+			if (!gravityRan) {gravity();}
+		});
+		playSound(soundClear);
+	} else {
+		playSound(soundWrong);
+	}
+	var blocksLeft = countBlocks();
+	if (blocksLeft == 0) {
+		levelComplete();
+	}
+}
+function shortPress(obj) {
+	//short press combines two colors
+	neighbors = [];
+	checked = [];
+	if (selected == null) {
+		selected = obj.id;
+		neighbors = getNeighbors(selected);
+		if (neighbors.length>2) {
+			n='';
+			for (i=0;i<neighbors.length;i++) {
+				n = n+"#"+neighbors[i]+',';
+			}
+			n = n.slice(0, -1);
+			$(n).css("opacity", "0.8");
+			playSound(soundSelect);
+		} else {
+			selected = null;
+			playSound(soundWrong);
+		}
+	} else if (selected == obj.id) {
+		neighbors = getNeighbors(selected);
+		n='';
+		for (i=0;i<neighbors.length;i++) {
+			n = n+"#"+neighbors[i]+',';
+		}
+		n = n.slice(0, -1);
+		selected = null;
+		$(n).css("opacity", "1");
+		playSound(soundDeselect);
+	} else {
+		colorOne = $.Color('#'+blocks[selected]['color']);
+		valueOne = blocks[selected]['depth'];
+		colorTwo = $.Color('#'+blocks[obj.id]['color']);
+		valueTwo = blocks[obj.id]['depth'];
+		if (valueOne >= valueTwo) {
+			newValue = valueOne + 1;
+		} else {
+			newValue = valueTwo + 1;
+		}
+		newColor = Color_mixer.mix(colorOne, colorTwo);
+		neighborsOne = getNeighbors(selected);
+		lengthOne = neighborsOne.length;
+		neighbors = [];
+		neighborsTwo = getNeighbors(obj.id);
+		lengthTwo = neighborsTwo.length;
+		neighbors = neighborsOne.concat(neighborsTwo);
+		neighbors.sort();
+		//Checking to see if the two color groups are neighbors
+		var isNeighbor = false;
+		for (no=0;no<neighborsOne.length;no++) {
+			for (nt=0;nt<neighborsTwo.length;nt++) {
+				if (blocks[neighborsTwo[nt]]['parent_num_id'] == blocks[neighborsOne[no]]['parent_num_id']-1 && blocks[neighborsOne[no]]['parent_num_id']%8 != 0) {
+					isNeighbor = true;
+				} else if (blocks[neighborsTwo[nt]]['parent_num_id'] == blocks[neighborsOne[no]]['parent_num_id']-8 && blocks[neighborsOne[no]]['parent_num_id'] > 7) {
+					isNeighbor = true;
+				} else if (blocks[neighborsTwo[nt]]['parent_num_id'] == blocks[neighborsOne[no]]['parent_num_id']+1 && (blocks[neighborsOne[no]]['parent_num_id']+1)%8 != 0) {
+					isNeighbor = true;
+				} else if (blocks[neighborsTwo[nt]]['parent_num_id'] == blocks[neighborsOne[no]]['parent_num_id']+8 && blocks[neighborsOne[no]]['parent_num_id'] < 56) {
+					isNeighbor = true;
+				}
+			}
+		}
+		if (lengthOne > 2 && lengthTwo > 2 && isNeighbor == true) {
+			playSound(soundCombine);
+			for (i=0;i<neighbors.length;i++) {
+				var numId = blocks[neighbors[i]]['num_id'];
+				blocks[neighbors[i]]['depth'] = newValue;
+				$("#color_depth_"+numId).css("textShadow", "0px 2px 0px "+newColor);
+				$("#color_depth_"+numId).text(newValue);
+				$("#"+neighbors[i]).animate({
+					backgroundColor : newColor,
+					borderColor : newColor
+				},500,function() {
+					blocks[$(this).attr("id")]['color'] = rgb2hex($(this).css("backgroundColor")).substring(1);
+				});
+			}
+		} else {
+			playSound(soundDeselect);
+		}
+		n='';
+		for (i=0;i<neighbors.length;i++) {
+			n = n+"#"+neighbors[i]+',';
+		}
+		n = n.slice(0, -1);
+		$(n).css("opacity", "1");
+		selected = null;
+	}
+}
+function scorePopUp(obj, points) {
+	$("#point_pop_up").text("+"+points);
+	$("#point_pop_up").css({"top" : 0, "left" : 0});
+	$("#point_pop_up").offset({top : 0, left : 0});
+	$("#point_pop_up").offset($(obj).offset());
+	$("#point_pop_up").fadeIn("slow",function() {
+		$(this).fadeOut("slow");
+	});
+}
+function levelComplete() {
+	fireWorksId = 0;
+	fireWorksTime = setInterval(fireWorks, 10);
+	var lcHTML = "Level Cleared!<br/>";
+	if (score >= eval('map'+curMap+'[65]')) {
+		//3 stars
+		var newScore = 3;
+		lcHTML += '<img src="images/star_filled.png" width="10%" /><img src="images/star_filled.png" width="10%" /><img src="images/star_filled.png" width="10%" />';
+	} else if (score >= eval('map'+curMap+'[64]')) {
+		//2 stars
+		var newScore = 2;
+		lcHTML += '<img src="images/star_filled.png" width="10%" /><img src="images/star_filled.png" width="10%" /><img src="images/star_empty.png" width="10%" />';
+	} else {
+		//1 star
+		var newScore = 1;
+		lcHTML += '<img src="images/star_filled.png" width="10%" /><img src="images/star_empty.png" width="10%" /><img src="images/star_empty.png" width="10%" />';
+	}
+	//If the level has been cleared before
+	if ($.isNumeric(starsArray[curMap])) {
+		//If the new score is higher than the recorded score
+		if (newScore > starsArray[curMap]) {
+			starsArray[curMap] = newScore;
+			db.transaction(function (tx) {
+				tx.executeSql('UPDATE STARS SET number = '+newScore+' WHERE level = '+curMap);
+			});
+		}
+	//Else make a new entry
+	} else {
+		starsArray[curMap] = newScore;
+		db.transaction(function (tx) {
+			tx.executeSql('INSERT INTO STARS (level, number) VALUES ('+curMap+', '+starsArray[curMap]+')');
+		});
+	}
+	numStars = 0;
+	for (i=0;i<starsArray.length;i++) {
+		if ($.isNumeric(starsArray[i])) {
+			numStars += starsArray[i];
+		}
+	}
+	$('#level_complete').html(lcHTML);
+	$("<div/>", {
+		id : "level_complete_menu",
+		css : {
+			width : "80%",
+			marginLeft : "10%",
+			marginTop : "5%",
+			textAlign : "center"
+		},
+		appendTo : "#level_complete"
+	});
+	$("<div/>", {
+		text : "Retry",
+		on : {
+			click : function() {
+				$("#level_complete").stop().fadeOut("fast", function() {
+					restartLevel();
+				});
+			}
+		},
+		css : {
+			width : "33%",
+			float : "left",
+			fontSize : "6vw"
+		},
+		appendTo : "#level_complete_menu"
+	});
+	if (Math.floor(numStars/20) >= Math.floor((curMap+1)/9)) {
+		$("<div/>", {
+			text : "Next",
+			on : {
+				click : function() {
+					$("#level_complete").stop().fadeOut("fast", function() {
+						nextLevel();
+					});
+				}
+			},
+			css : {
+				width : "calc(33% - 2px)",
+				float : "left",
+				borderLeft : "2px solid #666",
+				fontSize : "6vw"
+			},
+			appendTo : "#level_complete_menu"
+		});
+	} else {
+		$("<div/>", {
+			text : "Next",
+			css : {
+				width : "calc(33% - 2px)",
+				float : "left",
+				borderLeft : "2px solid #666",
+				fontSize : "6vw",
+				color : "888"
+			},
+			appendTo : "#level_complete_menu"
+		});
+	}
+	$("<div/>", {
+		text : "Home",
+		on : {
+			click : function() {
+				$("#level_complete").stop().fadeOut("fast", function() {
+					showZones();
+				});
+			}
+		},
+		css : {
+			width : "calc(33% - 2px)",
+			float : "left",
+			borderLeft : "2px solid #666",
+			fontSize : "6vw"
+		},
+		appendTo : "#level_complete_menu"
+	});
+	$.wait(1000).then(playSound(soundComplete));
+	$('#level_complete').css("top", ($(window).height()/2) - $('#level_complete').height());
+	$('#level_complete').fadeIn(1000).delay(9999999, function() {
+		clearInterval(fireWorksTime);
+		if (nextAd==0) {
+			if(AdMob) AdMob.showInterstitial();
+			nextAd = Math.floor(Math.random()*5)+3;
+		}
+	});
+}
+function countBlocks() {
+	var count = 0;
+	for (key in cells) {
+		if (cells[key] != null) {
+			count++;
+		}
+	}
+	return count;
+}
+function fireWorks() {
+	var color = Math.floor(Math.random()*colors.length);
+	var s = Math.floor(Math.random()*($(window).width())/20) + ($(window).width())/40;
+	var l = Math.floor(Math.random()*$('#game_window').width()) - Math.floor(Math.random()*$('#game_window').width())/10;
+	var t = Math.floor(Math.random()*$('#game_window').height()) - Math.floor(Math.random()*$('#game_window').height())/10;
+	$("<div/>", {
+		id : 'fw_'+fireWorksId,
+		css : {
+			background : '#'+colors[color],
+			height : s,
+			width : s,
+			borderRadius : s/2,
+			position : 'absolute',
+			zIndex:499,
+			left : l,
+			top : t,
+			opacity : 0
+		},
+		appendTo : "#game_window"
+	});
+	$('#fw_'+fireWorksId).animate({
+		opacity : 1,
+		height : s*1.2,
+		width : s*1.2,
+		borderRadius : (s/2)*1.2
+	},150,function() {
+		$(this).fadeOut(150,function() {
+			$(this).remove();
+		});
+	});
+	fireWorksId++;
+}
+function getNeighbors(block) {
+	//Returns an array of all matching neighbors
+	var cellId = blocks[block]['parent'];
+	if (neighbors.indexOf(cellId) == -1 && checked.indexOf(cellId) == -1) {
+		checked.push(cellId);
+		var numId = parseInt(blocks[block]['parent_num_id']);
+		var color = blocks[block]['color'];
+		//check left
+		if (numId%8 != 0) {
+			var leftCell = "cell_" + (numId - 1);
+			for (key in blocks) {
+				if (blocks[key]['parent'] == leftCell) {
+					leftBlock = key;
+				}
+			}
+			var leftColor = blocks[leftBlock]['color'];
+			if (leftColor == color && blocks[leftBlock]['parent_num_id'] == numId - 1) {
+				if (neighbors.indexOf(leftBlock) == -1) {
+					neighbors.push(leftBlock);
+					getNeighbors(leftBlock);
+				}
+			}
+		}
+		//check up
+		if (numId > 7) {
+			var upCell = "cell_" + (numId - 8);
+			for (key in blocks) {
+				if (blocks[key]['parent'] == upCell) {
+					upBlock = key;
+				}
+			}
+			var upColor = blocks[upBlock]['color'];
+			if (upColor == color && blocks[upBlock]['parent_num_id'] == numId - 8) {
+				if (neighbors.indexOf(upBlock) == -1) {
+					neighbors.push(upBlock);
+					getNeighbors(upBlock);
+				}
+			}
+		}
+		//check right
+		if ((numId+1)%8 != 0) {
+			var rightCell = "cell_" + (numId + 1);
+			for (key in blocks) {
+				if (blocks[key]['parent'] == rightCell) {
+					rightBlock = key;
+				}
+			}
+			var rightColor = blocks[rightBlock]['color'];
+			if (rightColor == color && blocks[rightBlock]['parent_num_id'] == numId + 1) {
+				if (neighbors.indexOf(rightBlock) == -1) {
+					neighbors.push(rightBlock);
+					getNeighbors(rightBlock);
+				}
+			}
+		}
+		//check down
+		if (numId < 56) {
+			var downCell = "cell_" + (numId + 8);
+			for (key in blocks) {
+				if (blocks[key]['parent'] == downCell) {
+					downBlock = key;
+				}
+			}
+			var downColor = blocks[downBlock]['color'];
+			if (downColor == color && blocks[downBlock]['parent_num_id'] == numId + 8) {
+				if (neighbors.indexOf(downBlock) == -1) {
+					neighbors.push(downBlock);
+					getNeighbors(downBlock);
+				}
+			}
+		}
+	}
+	return neighbors;
+}
+function gravity() {
+	gravityRan = true;
+	var movingBlocks = new Array();
+	var moveCount = new Array();
+	for (g=0;g<8;g++) {
+		for (i=63;i>7;i--) {
+			var upCell = i-8;
+			if (cells['cell_'+i] == null && cells['cell_'+upCell] != null) {
+				if (movingBlocks.indexOf('block_'+blocks[cells['cell_'+upCell]]['num_id']) == -1) {
+					movingBlocks.push('block_'+blocks[cells['cell_'+upCell]]['num_id']);
+					moveCount['block_'+blocks[cells['cell_'+upCell]]['num_id']] = 1;
+				} else {
+					moveCount['block_'+blocks[cells['cell_'+upCell]]['num_id']] += 1;
+				}
+					blocks[cells['cell_'+upCell]]['parent'] = 'cell_'+i;
+					blocks[cells['cell_'+upCell]]['parent_num_id'] = i;
+					cells['cell_'+i] = cells['cell_'+upCell];
+					cells['cell_'+upCell] = null;
+			}
+		}
+	}
+	var appendRan = 0;
+	for (i=0;i<movingBlocks.length;i++) {
+		$("#"+movingBlocks[i]).animate({
+			marginTop: $("#cell_0").outerHeight(true)*moveCount[movingBlocks[i]]
+		},250,function() {
+			appendRan++;
+			if (appendRan == movingBlocks.length) {
+				for (i=0;i<movingBlocks.length;i++) {
+					$("#"+movingBlocks[i]).appendTo("#"+blocks[movingBlocks[i]]['parent']);
+					$("#"+movingBlocks[i]).css("margin-top", "0px");
+				}
+				playSound(soundThud);
+			}
+		});
+	}
+}
+function getBlockId(cell) {
+	var block = "#"+$(cell).children("div").attr("id");
+	return block;
+}
+function getCellId(block) {
+	var cell = "#"+$(block).parent().attr("id");
+	return cell;
+}
+function resize() {
+	var windowHeight = $(window).height();
+	var windowWidth = $(window).width();
+	$("#wrapper").height($("#wrapper").width());
+	var leftOver = windowHeight - $("#wrapper").outerHeight(true);
+	var headerHeight = leftOver*0.35;
+	var footerHeight = leftOver*0.5;
+	var margin = ((leftOver*0.15)/4)-4;
+	$("#header").height(headerHeight+'px');
+	$("#footer").height(footerHeight+'px');
+	$("#score_box").css("marginTop", ($("#footer").height()-$("#retry_footer").outerHeight(true)-$("#score_box").children().outerHeight(true))/2);
+	$("#header_logo").css("marginTop", ($("#header").height()-$("#header_logo").height())/2);
+	$("#header, #wrapper, #footer").css("marginTop", margin);
+	$(".block").width(($("#wrapper").width()/8) - 10);
+	$(".block").height(($("#wrapper").height()/8) - 10);
+	$(".cell").width(($("#wrapper").width()/8) - 4);
+	$(".cell").height(($("#wrapper").height()/8) - 4);
+	console.log($(window).width()+', '+$(window).height());
+}
+function rgb2hex(rgb){
+ rgb = rgb.match(/^rgba?[\s+]?\([\s+]?(\d+)[\s+]?,[\s+]?(\d+)[\s+]?,[\s+]?(\d+)[\s+]?/i);
+ return (rgb && rgb.length === 4) ? "#" +
+  ("0" + parseInt(rgb[1],10).toString(16)).slice(-2) +
+  ("0" + parseInt(rgb[2],10).toString(16)).slice(-2) +
+  ("0" + parseInt(rgb[3],10).toString(16)).slice(-2) : '';
+}
+$.wait = function(ms) {
+    var defer = $.Deferred();
+    setTimeout(function() { defer.resolve(); }, ms);
+    return defer;
+};
+$(window).resize(function() {
+	resize();
+});
+function exitApp(what) {
+	switch(what) {
+		case 'confirm' :
+			$("#exit_confirm").fadeIn("fast");
+			break;
+		case 'yes' :
+			navigator.app.exitApp();
+			break;
+		case 'no' :
+			$("#exit_confirm").fadeOut("fast");
+			break;
+	}
+}
+/** Uncomment to add hand for video demos
+$(document).on("mousemove", function(event) {
+	var hX = event.pageX - 100;
+	var hY = event.pageY + 1;
+	$("#hand").css("left", hX);
+	$("#hand").css("top", hY);
+});
+$(document).on("mousedown", function() {
+	$("#hand").attr("src", "images/hand_select.png");
+});
+$(document).on("mouseup", function() {
+	$("#hand").attr("src", "images/hand.png");
+});
+**/
+</script>
+</head>
+<body scroll="no">
+<div id="blanket" style="position:absolute;width:100%;height:100%;background:#000;left:0;top:0;"></div>
+<script type="text/javascript" src="cordova.js"></script>
+<div id="header" class="main_box">
+	<img id="header_logo" src="images/logo.gif" />
+	<a href="#" id="menu_button"><img width="100%" src="images/menu.png" /></a>
+</div>
+<div id="wrapper" class="main_box">
+	<div id="game_window">
+	</div>
+</div>
+<div id="footer" class="main_box">
+	<div id="retry_footer" class="footer_header" style="border-right:1px solid #666;">Retry</div>
+	<div id="home_footer" class="footer_header" style="border-right:1px solid #666;">Home</div>
+	<div id="exit_footer" class="footer_header">Quit</div><br/>
+	<div id="score_box"><span><img src="images/help.png" style="width:6vw;margin-right:4px;" />How To Play</span></div>
+</div>
+</body>
+<div id="point_pop_up"></div>
+<div id="level_complete">Level Cleared!</div>
+<div id="splash_screen">
+	<img src="images/logo.gif" id="splash_logo" /><br/>
+	<img src="images/nafogel_logo_medium_shadow.png" id="splash_company_logo" />
+	<img src="images/loading.gif" id="splash_loading" />
+</div>
+<div id="menu">
+	<div class="menu_header">
+		<div id="x_menu"><img src="images/close.png" width="100%" /></div>
+		<img src="images/logo.gif" style="margin-left:10%;width:80%;" />
+	</div>
+	<div class="menu_section_header">Menu</div>
+	<div class="menu_item" id="help_menu"><img src="images/help.png" style="width:5vw;margin-right:4px;" />How to Play</div>
+		<div class="menu_item" id="retry_menu"><img src="images/retry.png" style="width:5vw;margin-right:4px;" />Retry</div>
+		<div class="menu_item" id="home_menu"><img src="images/home.png" style="width:5vw;margin-right:4px;" />Home</div>
+		<div class="menu_item" id="profile_menu"><img src="images/profile.png" style="width:5vw;margin-right:4px;" />Profile</div>
+		<div class="menu_item" id="exit_menu"><img src="images/close.png" style="width:5vw;margin-right:4px;" />Quit</div>
+	<div class="menu_section_divider"><img src="images/settings.png" style="width:6vw;margin-right:4px;" />Settings</div>
+		<div class="menu_item" id="sound_menu"><img src="images/volume.png" style="width:5vw;margin-right:4px;" />Sound</div>
+	<div class="menu_section_divider"><img src="images/thumbs.png" style="width:6vw;margin-right:4px;" />Follow Us</div>
+		<div onclick="window.open('https://fb.me/primarymobile', '_system');" class="menu_item"><img src="images/facebook.png" style="width:5vw;margin-right:4px;" />Facebook</div>
+		<div onclick="window.open('https://twitter.com/primary_mobile', '_system');" class="menu_item"><img src="images/twitter.png" style="width:5vw;margin-right:4px;" />Twitter</div>
+		<div onclick="window.open('https://www.instagram.com/primary_mobile', '_system');" class="menu_item"><img src="images/instagram.png" style="width:5vw;margin-right:4px;" />Instagram</div>
+		<div onclick="window.open('mailto:primarymobilegame@gmail.com', '_system');" class="menu_item"><img src="images/email.png" style="width:5vw;margin-right:4px;" />Email</div>
+</div>
+<div id="exit_confirm">
+	<div style="margin-bottom:4px;">Are you sure you want to quit?</div>
+	<div class="quit_confirm_yn"style="margin-left:15%;margin-right:5%;">yes</div><div class="quit_confirm_yn">no</div>
+</div>
+<div id="how_to_play">
+	<div id="how_to_play_header">
+		-How To Play-
+		<div id="x_how_to_play"><img src="images/close.png" width="100%" /></div>
+	</div>
+	<hr style="width:80%;background-color:#333;color:#333;" />
+	<div id="how_to_play_content">
+		<span style="display:block;text-align:center;">The goal of primary is to clear each level with as many points as possible. You are awarded up to 3 stars based on how many points you get.</span><br/>
+		<span style="font-weight:bold;font-style:italic;padding-left:6vw;">Combine</span> tiles by selecting two different colored neighboring tiles. The more times a group of tiles has been combined the more points those tiles are worth once they are cleared. You can only combine colors when both groups contain at least 3 or more tiles of the same color.<br/><br />
+		<span style="font-weight:bold;font-style:italic;padding-left:6vw;">Clear</span> tiles by pressing and holding a group of matching tiles. You can only clear a group when it contains 3 or more tiles of the same color. The level is complete once all of the tiles have been cleared. If you're stuck simply start over by clicking the retry button.<br /><br />
+		<span style="font-weight:bold;font-style:italic;padding-left:6vw;">Unlock</span> new zones and levels by earning stars from clearing levels. You can earn up to 3 stars from each level.
+	</div>
+</div>
+</html>
+<!--<img id="hand" src="images/hand.png" style="position:absolute;z-index:9999;" />-->

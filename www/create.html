@@ -1,0 +1,85 @@
+<html>
+<script src="js/jquery-3.3.1.min.js"></script>
+<script>
+var curColor = null;
+var mapText = "var map0 = new Array(";
+var map = new Array();
+var colors = new Array("cc0000","f5fc0f","00c2ff","735873","7ce087","e17207","080808","efefef","7c7c7c","de6f6f","424242","7cdaf8");
+$(document).ready(function() {
+	for (i=0;i<64;i++) {
+		$("<div/>", {
+			id : "cell_"+i,
+			class : "cell",
+			css : {
+				background : "#"+colors[0]
+			},
+			attr : {
+				"index" : i
+			},
+			on : {
+				click : function() {
+					changeColor(this);
+				}
+			},
+			appendTo : "#window"
+		});
+		map.push(0); 
+	}
+	mapText += map.join() + ");";
+	updateMapText();
+	for (i=0;i<colors.length;i++) {
+		$("<div/>", {
+			id : "color_"+i,
+			class : "color",
+			attr : {
+				"index" : i
+			},
+			css : {
+				background : "#"+colors[i]
+			},
+			on : {
+				click : function() {
+					selColor(this);
+				}
+			},
+			appendTo : "#colors"
+		});
+	}
+});
+function selColor (obj) {
+	if (curColor != $(obj).attr("index")) {
+		$("#color_"+curColor).css("borderColor", "#666");
+		curColor = $(obj).attr("index");
+		$(obj).css("borderColor", "#FFF");
+		console.log($(obj).css("borderColor"));
+	} else {
+		$("#color_"+curColor).css("borderColor", "#666");
+		curColor = null;
+	}
+}
+function changeColor(obj) {
+	if (curColor != null) {
+		$(obj).css("backgroundColor", colors[curColor]);
+		map[$(obj).attr("index")] = curColor;
+		updateMapText();
+	}
+}
+function updateMapText() {
+	mapText = "var map0 = new Array(";
+	mapText += map.join() + ");"
+	$("#output").val(mapText);
+}
+</script>
+<style>
+.cell {width:50px;height:50px;margin:2px;float:left;cursor:pointer;}
+.color {width:50px;height:50px;margin:2px;cursor:pointer;border:2px groove #666;}
+#colors {float:left;width:58px;border:2px groove #999;background:#333;margin-left:8px;padding:2px;border-radius:4px;}
+#output {width:400px;height:200px;margin-left:8px;}
+#window {border:2px groove #999;border-radius:4px;background:#333;height:432px;width:432px;float:left;padding:2px;}
+</style>
+<body>
+	<div id="window"></div>
+	<div id="colors"></div>
+	<textarea id="output"></textarea>
+</body>
+</html>
